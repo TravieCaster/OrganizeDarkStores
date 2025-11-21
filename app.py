@@ -2,26 +2,24 @@ import streamlit as st
 import pandas as pd
 from io import BytesIO
 
-# ===== CONFIG =====
-# Colors per shelf.
-# A, B, C, F, H, Others are from your QDE5-style template.
-# D and I are explicitly set so they are not white.
+# ===== CONFIG: COLORS FROM "Copy of QDE5 (1).xlsx" HEADER =====
+# These hex values are taken directly from the sheet header fills.
 SHELF_COLORS = {
     "A": "#00B050",
     "B": "#0070C0",
     "C": "#FFFF00",
-    "D": "#9B30FF",   # purple (custom, change if needed)
-    "E": None,
+    "D": "#6FC5E6",
+    "E": "#000000",
     "F": "#CC0000",
-    "G": None,
+    "G": "#000000",
     "H": "#FFC000",
-    "I": "#996600",   # brown (from original palette)
-    "J": None,
-    "K": None,
-    "L": None,
-    "M": None,
-    "N": None,
-    "O": None,
+    "I": "#000000",
+    "J": "#000000",
+    "K": "#000000",
+    "L": "#000000",
+    "M": "#000000",
+    "N": "#000000",
+    "O": "#000000",
     "Others": "#000000",
 }
 
@@ -59,12 +57,16 @@ def build_layout(labels):
     groups = {shelf: [] for shelf in SHELF_ORDER}
 
     for label in labels:
-        if label is None or str(label).strip() == "":
+        if label is None:
             continue
-        shelf = detect_shelf(label)
+        text = str(label).strip()
+        if text == "":
+            continue
+
+        shelf = detect_shelf(text)
         if shelf not in groups:
             shelf = "Others"
-        groups[shelf].append(str(label).strip())
+        groups[shelf].append(text)
 
     max_len = max((len(vals) for vals in groups.values()), default=0)
 
@@ -78,62 +80,68 @@ def build_layout(labels):
     return df_out
 
 
-def to_excel_with_colors(df_out: pd.DataFrame) -> bytes:
+def write_output_workbook(sheets_labels: dict) -> bytes:
     """
-    Write DataFrame to Excel with:
-    - Row 1: color hex code (#RRGGBB) for each shelf column, with background color (if defined)
-    - Row 2: shelf letter (A, B, C, ... Others), with same background color (if defined)
-    - Data starting from row 3
+    sheets_labels: dict { sheet_name -> list_of_labels }
+
+    For each sheet in the input, create a corresponding sheet in the
+    output workbook with:
+    - Row 1: color hex code (#RRGGBB) with background color
+    - Row 2: shelf letter (A..O, Others) with same background
+    - Row 3+: label IDs
     """
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        # Write data WITHOUT headers, starting at row 2 (Excel row 3)
-        df_out.to_excel(
-            writer,
-            sheet_name="Sheet1",
-            index=False,
-            header=False,
-            startrow=2
-        )
-
         workbook = writer.book
-        worksheet = writer.sheets["Sheet1"]
 
-        for col_idx, shelf in enumerate(SHELF_ORDER):
-            color_hex = SHELF_COLORS.get(shelf)
+        for sheet_name, labels in sheets_labels.items():
+            df_out = build_layout(labels)
 
-            # Format for row 1 (color code)
-            row1_format = workbook.add_format(
-                {
-                    "align": "center",
-                    "valign": "vcenter",
-                    "border": 1,
-                }
-            )
-            # Format for row 2 (shelf header)
-            row2_format = workbook.add_format(
-                {
-                    "bold": True,
-                    "align": "center",
-                    "valign": "vcenter",
-                    "border": 1,
-                }
+            # Write data WITHOUT headers, starting at row 2 (Excel row 3)
+            df_out.to_excel(
+                writer,
+                sheet_name=sheet_name,
+                index=False,
+                header=False,
+                startrow=2,
             )
 
-            if color_hex:
-                row1_format.set_bg_color(color_hex)
-                row2_format.set_bg_color(color_hex)
-                # Row 1: hex code text
-                worksheet.write(0, col_idx, color_hex, row1_format)
-            else:
-                # No color defined: keep row 1 blank, just border
-                worksheet.write(0, col_idx, "", row1_format)
+            worksheet = writer.sheets[sheet_name]
 
-            # Row 2: shelf letter
-            worksheet.write(1, col_idx, shelf, row2_format)
+            for col_idx, shelf in enumerate(SHELF_ORDER):
+                color_hex = SHELF_COLORS.get(shelf)
 
-        # Set column width
-        worksheet.set_column(0, len(SHELF_ORDER) - 1, 22)
+                # Row 1 (color code)
+                row1_format = workbook.add_format(
+                    {
+                        "align": "center",
+                        "valign": "vcenter",
+                        "border": 1,
+                    }
+                )
+                # Row 2 (shelf header)
+                row2_format = workbook.add_format(
+                    {
+                        "bold": True,
+                        "align": "center",
+                        "valign": "vcenter",
+                        "border": 1,
+                    }
+                )
+
+                if color_hex:
+                    row1_format.set_bg_color(color_hex)
+                    row2_format.set_bg_color(color_hex)
+                    # Put hex text in Row 1
+                    worksheet.write(0, col_idx, color_hex, row1_format)
+                else:
+                    worksheet.write(0, col_idx, "", row1_format)
+
+                # Shelf letter in Row 2
+                worksheet.write(1, col_idx, shelf, row2_format)
+
+            # Column widths
+            worksheet.set_column(0, len(SHELF_ORDER) - 1, 22)
 
     output.seek(0)
     return output.getvalue()
@@ -141,66 +149,64 @@ def to_excel_with_colors(df_out: pd.DataFrame) -> bytes:
 
 # ===== STREAMLIT APP =====
 
-st.title("Shelf-based Bin Label Layout (Excel Upload Only)")
+st.title("Shelf Layout Generator (QDE5 Header Colours)")
 
 st.write(
     """
-Upload an **Excel file (.xlsx / .xls)** with bin label IDs.
+Upload an **Excel file (.xlsx)** with bin label IDs.
 
-This app will:
-- Detect the shelf from **digit 9** of each label ID.
-- Place labels into columns **A–O** or **Others**.
-- Generate an Excel file where:
-  - **Row 1** = color hex code (background colored).
-  - **Row 2** = shelf letter (background colored).
-  - **Row 3+** = label IDs.
+For **each sheet** in the file:
+- All non-empty cells are treated as label IDs.
+- Shelf is taken from **digit 9** of the label.
+- Labels are placed into columns **A–O** and **Others**.
+- Headers use the **exact colours** from your QDE5 template:
+  - **Row 1**: hex colour code with background.
+  - **Row 2**: shelf letter with same background.
+  - **Row 3+**: label IDs.
 """
 )
 
 uploaded_file = st.file_uploader(
-    "Upload Excel file with label IDs",
-    type=["xlsx", "xls"],
+    "Upload Excel file with label IDs (all sheets will be processed)",
+    type=["xlsx"],
 )
-
-labels = []
-
-if uploaded_file is not None:
-    try:
-        # Read all sheets, let user pick one
-        xls = pd.ExcelFile(uploaded_file)
-        sheet_name = st.selectbox("Select sheet to use", xls.sheet_names)
-
-        df_in = pd.read_excel(xls, sheet_name=sheet_name)
-
-        if df_in.empty:
-            st.error("Selected sheet is empty.")
-        else:
-            label_column_name = st.selectbox(
-                "Select the column that contains label IDs",
-                df_in.columns,
-            )
-
-            labels = df_in[label_column_name].tolist()
-            st.write(f"Detected **{len(labels)}** labels from sheet **{sheet_name}**.")
-
-    except Exception as e:
-        st.error(f"Failed to read Excel file: {e}")
 
 generate = st.button("Generate shelf layout Excel")
 
 if generate:
-    if not labels:
-        st.error("No labels found. Please upload a file and select the correct sheet/column.")
+    if uploaded_file is None:
+        st.error("Please upload an Excel (.xlsx) file first.")
     else:
-        df_out = build_layout(labels)
-        excel_bytes = to_excel_with_colors(df_out)
+        try:
+            # Read all sheets, no assumptions about columns.
+            # header=None so we don't treat any row as header; we just take everything.
+            xls_dict = pd.read_excel(uploaded_file, sheet_name=None, header=None)
+        except Exception as e:
+            st.error(f"Failed to read Excel file: {e}")
+        else:
+            sheets_labels = {}
+            for sheet_name, df in xls_dict.items():
+                # Flatten all non-empty cells as labels
+                values = df.to_numpy().ravel()
+                labels = [v for v in values if pd.notna(v) and str(v).strip() != ""]
+                sheets_labels[sheet_name] = labels
 
-        st.success("Excel generated successfully.")
-        st.dataframe(df_out.head(20))  # Preview
+            if not sheets_labels:
+                st.error("No data found in the uploaded workbook.")
+            else:
+                # Build output workbook
+                excel_bytes = write_output_workbook(sheets_labels)
 
-        st.download_button(
-            label="Download shelf layout Excel",
-            data=excel_bytes,
-            file_name="shelf_labels_layout.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+                # Quick preview from first sheet
+                first_sheet = next(iter(sheets_labels.keys()))
+                preview_df = build_layout(sheets_labels[first_sheet])
+                st.write(f"Preview from sheet: **{first_sheet}**")
+                st.dataframe(preview_df.head(20))
+
+                st.success("Shelf layout Excel generated successfully.")
+                st.download_button(
+                    label="Download shelf layout Excel",
+                    data=excel_bytes,
+                    file_name="shelf_labels_layout_QDE5_colours.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )

@@ -53,25 +53,34 @@ def detect_shelf(label: str) -> str:
 def get_cell_color_hex(cell):
     """
     Get cell background colour as #RRGGBB.
-    If we can't get a proper RGB colour → return None.
+
+    - If we have an explicit RGB (most manual fills), use it.
+    - If it's theme/indexed but has a visible fill, we fall back
+      to a default baby blue (#61CBF3) instead of white.
     """
     fill = cell.fill
-    if not fill:
+    if not fill or getattr(fill, "patternType", None) in (None, "none"):
         return None
 
-    fg = fill.fgColor
-    if not fg:
+    # Prefer fgColor, fall back to start_color
+    color_obj = getattr(fill, "fgColor", None) or getattr(fill, "start_color", None)
+    if not color_obj:
         return None
 
-    # Most fills will come as ARGB "FFRRGGBB"
-    if fg.type == "rgb" and fg.rgb:
-        rgb = fg.rgb
+    ctype = getattr(color_obj, "type", None)
+    rgb = getattr(color_obj, "rgb", None)
+
+    # Direct RGB (e.g. "FFRRGGBB")
+    if ctype == "rgb" and rgb:
         if len(rgb) == 8:  # ARGB
             rgb = rgb[2:]
         if len(rgb) == 6:
             return "#" + rgb.upper()
 
-    # Theme / indexed fills are ignored (treated as no colour)
+    # Theme/indexed colours – treat as baby blue so they aren't white
+    if ctype in ("theme", "indexed"):
+        return "#61CBF3"  # fallback baby blue
+
     return None
 
 
@@ -79,6 +88,7 @@ def process_sheet(ws):
     """
     Read a single worksheet.
     - All non-empty cells are labels.
+    - Exclude any label that contains 'bin' (case-insensitive).
     - Shelves A–O: just text.
     - Others: keep text + source cell colour.
 
@@ -94,8 +104,13 @@ def process_sheet(ws):
             val = cell.value
             if val is None:
                 continue
+
             text = str(val).strip()
             if not text:
+                continue
+
+            # Exclude labels that include the word "bin" (any case)
+            if "bin" in text.lower():
                 continue
 
             shelf = detect_shelf(text)
@@ -201,9 +216,10 @@ Upload an **Excel file (.xlsx)** with bin label IDs.
 
 For **each sheet** in the file:
 - All non-empty cells are treated as label IDs.
+- Any label containing the word **"bin"** (any case) is **excluded**.
 - Shelf is from **digit 9** of the label.
 - Labels go into columns **A–O** or **Others**.
-- Header colours for A–O match your template exactly.
+- Header colours for A–I match your template.
 - **Others**:
   - Header stays white.
   - Each label keeps its original cell colour from the uploaded sheet.

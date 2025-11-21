@@ -1,166 +1,130 @@
 import streamlit as st
 import pandas as pd
 from io import BytesIO
-from openpyxl import load_workbook
 
-# ===== COLOR EXTRACTION HELPERS =====
+# ===== CONFIG FROM YOUR "Copy of QDE5 (1).xlsx" HEADER =====
+# Only shelves that actually had a specific color in the file
+SHELF_COLORS = {
+    "A": "#00B050",
+    "B": "#0070C0",
+    "C": "#FFFF00",
+    "F": "#CC0000",
+    "H": "#FFC000",
+    "Others": "#000000",
+    # Shelves D, E, G, I, J, K, L, M, N, O had theme/default fills in your file,
+    # so we leave them without explicit color (they’ll show as no fill).
+}
 
-def get_cell_color_hex(cell):
+SHELF_ORDER = list("ABCDEFGHIJKLMNO") + ["Others"]
+
+
+def detect_shelf(label: str) -> str:
     """
-    Get the cell's background color as a #RRGGBB hex string.
-    If no usable RGB color, return None.
+    Shelf is always digit number 9 in the label ID.
+    Example: HAZ-A101I123 -> 9th char = 'I' -> shelf I.
+    If 9th char is not A–O, send it to Others.
     """
-    fill = cell.fill
-    if fill is None:
-        return None
+    if label is None:
+        return "Others"
 
-    fg = fill.fgColor
-    if fg is None:
-        return None
+    text = str(label).strip()
+    if len(text) < 9:
+        return "Others"
 
-    # Most manual fills in Excel come through as rgb = "FFRRGGBB"
-    if fg.type == "rgb" and fg.rgb:
-        rgb = fg.rgb
-        # Handle ARGB (e.g. "FFRRGGBB") → take last 6 chars (RRGGBB)
-        if len(rgb) == 8:
-            rgb = rgb[2:]
-        if len(rgb) == 6:
-            return "#" + rgb.upper()
+    ch = text[8]  # 0-based index → 9th character
+    ch_up = ch.upper()
 
-    # If indexed/theme/etc, we skip exact mapping for simplicity
-    return None
+    if ch_up in SHELF_ORDER[:-1]:  # A–O
+        return ch_up
+
+    return "Others"
 
 
-def extract_color_groups(workbook):
+def build_layout(labels):
     """
-    For each sheet, build a dict:
-    sheet_name -> { color_hex -> [labels] }
-
-    - Scans all cells.
-    - Uses non-empty cell values as labels.
-    - Groups by background color.
+    Take a flat list of labels, group by shelf, and arrange into
+    columns A–O + Others, each column filled top-down.
+    Returns a pandas DataFrame ready to write to Excel.
     """
-    sheets_dict = {}
+    groups = {shelf: [] for shelf in SHELF_ORDER}
 
-    for ws in workbook.worksheets:
-        color_groups = {}
+    for label in labels:
+        if label is None or str(label).strip() == "":
+            continue
+        shelf = detect_shelf(label)
+        if shelf not in groups:
+            shelf = "Others"
+        groups[shelf].append(str(label).strip())
 
-        for row in ws.iter_rows():
-            for cell in row:
-                value = cell.value
-                if value is None:
-                    continue
+    max_len = max((len(vals) for vals in groups.values()), default=0)
 
-                text = str(value).strip()
-                if not text:
-                    continue
-
-                color_hex = get_cell_color_hex(cell)
-                # If no color, treat as white (or generic) group so nothing is lost
-                if color_hex is None:
-                    color_hex = "#FFFFFF"
-
-                if color_hex not in color_groups:
-                    color_groups[color_hex] = []
-
-                color_groups[color_hex].append(text)
-
-        sheets_dict[ws.title] = color_groups
-
-    return sheets_dict
-
-
-def build_df_from_color_groups(color_groups):
-    """
-    From { color_hex -> [labels] } create:
-    - DataFrame with each column = color_hex, rows = labels.
-    - Ordered list of colors (column order).
-    """
-    if not color_groups:
-        return pd.DataFrame(), []
-
-    # Sort colors to have deterministic column order
-    colors = sorted(color_groups.keys())
-
-    max_len = max(len(vals) for vals in color_groups.values())
     data = {}
-
-    for color in colors:
-        vals = color_groups[color]
-        vals = vals + [""] * (max_len - len(vals))
-        data[color] = vals
+    for shelf in SHELF_ORDER:
+        col_vals = groups[shelf]
+        col_vals = col_vals + [""] * (max_len - len(col_vals))
+        data[shelf] = col_vals
 
     df_out = pd.DataFrame(data)
-    return df_out, colors
+    return df_out
 
 
-def write_grouped_workbook(sheets_dict):
+def to_excel_with_colors(df_out: pd.DataFrame) -> bytes:
     """
-    Given:
-      sheets_dict: { sheet_name -> { color_hex -> [labels] } }
-
-    Create an Excel file in memory:
-      - One sheet per input sheet.
-      - Row 1: color hex text + background
-      - Row 2: blank header row with same background (visual band)
-      - Row 3+: labels in each color group column
+    Write DataFrame to Excel with:
+    - Row 1: color hex code (#RRGGBB) for each shelf column, with background color (if defined)
+    - Row 2: shelf letter (A, B, C, ... Others), with same background color (if defined)
+    - Data starting from row 3
     """
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        # Write data WITHOUT headers, starting at row 2 (Excel row 3)
+        df_out.to_excel(
+            writer,
+            sheet_name="Sheet1",
+            index=False,
+            header=False,
+            startrow=2
+        )
+
         workbook = writer.book
+        worksheet = writer.sheets["Sheet1"]
 
-        for sheet_name, color_groups in sheets_dict.items():
-            df_out, colors = build_df_from_color_groups(color_groups)
+        for col_idx, shelf in enumerate(SHELF_ORDER):
+            color_hex = SHELF_COLORS.get(shelf)
 
-            # If sheet had no labels, just create an empty sheet
-            if df_out.empty:
-                df_out.to_excel(writer, sheet_name=sheet_name, index=False)
-                continue
-
-            # Write data WITHOUT headers, starting at row 2 (Excel row 3)
-            df_out.to_excel(
-                writer,
-                sheet_name=sheet_name,
-                index=False,
-                header=False,
-                startrow=2,
+            # Format for row 1 (color code)
+            row1_format = workbook.add_format(
+                {
+                    "align": "center",
+                    "valign": "vcenter",
+                    "border": 1,
+                }
+            )
+            # Format for row 2 (shelf header)
+            row2_format = workbook.add_format(
+                {
+                    "bold": True,
+                    "align": "center",
+                    "valign": "vcenter",
+                    "border": 1,
+                }
             )
 
-            worksheet = writer.sheets[sheet_name]
+            if color_hex:
+                row1_format.set_bg_color(color_hex)
+                row2_format.set_bg_color(color_hex)
 
-            # Row 0: color hex code text with colored background
-            # Row 1: blank row, same background (visual header band)
-            for col_idx, color_hex in enumerate(colors):
-                # Format for row 0 (color code)
-                header1_format = workbook.add_format(
-                    {
-                        "align": "center",
-                        "valign": "vcenter",
-                        "border": 1,
-                    }
-                )
-                # Format for row 1 (blank, but colored)
-                header2_format = workbook.add_format(
-                    {
-                        "bold": True,
-                        "align": "center",
-                        "valign": "vcenter",
-                        "border": 1,
-                    }
-                )
+                # Row 1: hex code text
+                worksheet.write(0, col_idx, color_hex, row1_format)
+            else:
+                # No color defined: keep row 1 blank, just border
+                worksheet.write(0, col_idx, "", row1_format)
 
-                # Only set bg if color looks like #RRGGBB
-                if isinstance(color_hex, str) and color_hex.startswith("#") and len(color_hex) == 7:
-                    header1_format.set_bg_color(color_hex)
-                    header2_format.set_bg_color(color_hex)
+            # Row 2: shelf letter
+            worksheet.write(1, col_idx, shelf, row2_format)
 
-                # Row 0: write color hex
-                worksheet.write(0, col_idx, color_hex, header1_format)
-                # Row 1: blank but colored
-                worksheet.write(1, col_idx, "", header2_format)
-
-            # Set nice column width
-            worksheet.set_column(0, len(colors) - 1, 22)
+        # Set a decent column width
+        worksheet.set_column(0, len(SHELF_ORDER) - 1, 22)
 
     output.seek(0)
     return output.getvalue()
@@ -168,66 +132,83 @@ def write_grouped_workbook(sheets_dict):
 
 # ===== STREAMLIT APP =====
 
-st.title("Bin Label Color Grouper (by cell color)")
+st.title("Shelf-based Bin Label Layout (QDE5 Style)")
 
 st.write(
     """
-Upload an **Excel file (.xlsx)** where each sheet contains bin labels
-with different **cell background colors**.
-
-This app will:
-- Read each sheet in the file.
-- Group labels by **cell background color**.
-- Create a new Excel where:
-  - Each sheet mirrors the original sheet name.
-  - Each **column = one color** from that sheet.
-  - **Row 1** shows the color hex code (e.g. `#339900`) and is filled with that color.
-  - **Row 2** is a blank header row, also filled with that color.
-  - From **Row 3 down** are the labels that had that color.
+This app:
+- Detects the shelf from **digit 9** of each label ID.
+- Places labels into columns **A–O** or **Others**.
+- Colors the headers using the same scheme as your QDE5 template:
+  - **Row 1**: color hex code (e.g. `#00B050`) with that background.
+  - **Row 2**: shelf letter with same background.
+  - **Row 3+**: labels.
 """
 )
 
-uploaded_file = st.file_uploader(
-    "Upload Excel file (.xlsx) with colored bin labels",
-    type=["xlsx"],
+input_mode = st.radio(
+    "How do you want to provide labels?",
+    ("Paste list", "Upload Excel/CSV"),
+    horizontal=True,
 )
 
-if uploaded_file is not None:
-    st.info("File uploaded. Click **Generate grouped Excel** to process.")
+labels = []
 
-generate = st.button("Generate grouped Excel")
+if input_mode == "Paste list":
+    text = st.text_area(
+        "Paste labels here (one per line or separated by commas):",
+        height=200,
+        placeholder="Example:\nHAZ-A101A110\nHAZ-A101B110\nHAZ-A101I123\nSTOWAGE_1_A_001",
+    )
+    if text:
+        raw = []
+        for line in text.splitlines():
+            for part in line.split(","):
+                val = part.strip()
+                if val:
+                    raw.append(val)
+        labels = raw
+
+else:  # Upload file
+    uploaded_file = st.file_uploader(
+        "Upload an Excel or CSV file that contains label IDs",
+        type=["xlsx", "xls", "csv"],
+    )
+    label_column_name = st.text_input(
+        "Column name that contains labels (if blank, app will use the first column)",
+        value="",
+    )
+
+    if uploaded_file is not None:
+        if uploaded_file.name.lower().endswith(".csv"):
+            df_in = pd.read_csv(uploaded_file)
+        else:
+            df_in = pd.read_excel(uploaded_file)
+
+        if label_column_name and label_column_name in df_in.columns:
+            labels = df_in[label_column_name].tolist()
+        else:
+            first_col = df_in.columns[0]
+            labels = df_in[first_col].tolist()
+
+        st.write("Detected labels:", len(labels))
+
+
+generate = st.button("Generate Excel")
 
 if generate:
-    if uploaded_file is None:
-        st.error("Please upload an Excel (.xlsx) file first.")
+    if not labels:
+        st.error("No labels found. Please paste or upload labels first.")
     else:
-        try:
-            # Load workbook from uploaded file
-            wb = load_workbook(uploaded_file, data_only=True)
-        except Exception as e:
-            st.error(f"Failed to read Excel file: {e}")
-        else:
-            # Extract color groups per sheet
-            sheets_dict = extract_color_groups(wb)
+        df_out = build_layout(labels)
+        excel_bytes = to_excel_with_colors(df_out)
 
-            # Build output workbook
-            excel_bytes = write_grouped_workbook(sheets_dict)
+        st.success("Excel generated successfully.")
+        st.dataframe(df_out.head(20))  # preview
 
-            # Simple preview: show first processed sheet if any
-            first_sheet_name = next(iter(sheets_dict.keys()), None)
-            if first_sheet_name:
-                df_preview, colors_preview = build_df_from_color_groups(
-                    sheets_dict[first_sheet_name]
-                )
-                if not df_preview.empty:
-                    st.write(f"Preview from sheet: **{first_sheet_name}**")
-                    st.dataframe(df_preview.head(20))
-
-            st.success("Grouped Excel generated successfully.")
-
-            st.download_button(
-                label="Download grouped Excel",
-                data=excel_bytes,
-                file_name="bin_labels_grouped_by_color.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+        st.download_button(
+            label="Download color-coded Excel",
+            data=excel_bytes,
+            file_name="shelf_labels_QDE5_style.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )

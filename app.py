@@ -4,7 +4,7 @@ from io import BytesIO
 
 # ===== CONFIG =====
 
-# Shelf header colors copied from your Furjan.xlsx
+# Shelf header colors (Furjan style)
 SHELF_COLORS = {
     "A": "#FFFFFF",
     "B": "#339900",
@@ -55,7 +55,6 @@ def build_layout(labels):
     columns A–O + Others, each column filled top-down.
     Returns a pandas DataFrame ready to write to Excel.
     """
-    # Initialize groups
     groups = {shelf: [] for shelf in SHELF_ORDER}
 
     for label in labels:
@@ -71,7 +70,6 @@ def build_layout(labels):
     data = {}
     for shelf in SHELF_ORDER:
         col_vals = groups[shelf]
-        # pad with empty strings to same length
         col_vals = col_vals + [""] * (max_len - len(col_vals))
         data[shelf] = col_vals
 
@@ -81,18 +79,57 @@ def build_layout(labels):
 
 def to_excel_with_colors(df_out: pd.DataFrame) -> bytes:
     """
-    Write DataFrame to Excel with header colors matching your template.
+    Write DataFrame to Excel with:
+    - Row 1: color hex code (#) for each shelf column, with background color
+    - Row 2: shelf letter (A, B, C, ... Others), with same background color
+    - Data starting from row 3
     """
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        # Start data from row 1, we’ll write headers manually on row 0
-        df_out.to_excel(writer, sheet_name="Sheet1", index=False, startrow=1)
+        # Write data WITHOUT headers, starting at row 2 (Excel row 3)
+        df_out.to_excel(writer, sheet_name="Sheet1", index=False, header=False, startrow=2)
 
         workbook = writer.book
         worksheet = writer.sheets["Sheet1"]
 
-        # Write headers with colors
+        # Common formats
+        base_header_format = workbook.add_format(
+            {
+                "bold": True,
+                "align": "center",
+                "valign": "vcenter",
+                "border": 1,
+            }
+        )
+        base_color_code_format = workbook.add_format(
+            {
+                "align": "center",
+                "valign": "vcenter",
+                "border": 1,
+            }
+        )
+
+        # Row 0: color code (#xxxxxx)
+        # Row 1: shelf letter
         for col_idx, col_name in enumerate(SHELF_ORDER):
+            color = SHELF_COLORS.get(col_name)
+
+            # Row 0: color code text + bg
+            if color:
+                color_code_format = workbook.add_format(
+                    {
+                        "align": "center",
+                        "valign": "vcenter",
+                        "border": 1,
+                    }
+                )
+                color_code_format.set_bg_color(color)
+                worksheet.write(0, col_idx, color, color_code_format)
+            else:
+                # Others: keep empty but bordered
+                worksheet.write(0, col_idx, "", base_color_code_format)
+
+            # Row 1: shelf letter with same bg
             header_format = workbook.add_format(
                 {
                     "bold": True,
@@ -101,12 +138,10 @@ def to_excel_with_colors(df_out: pd.DataFrame) -> bytes:
                     "border": 1,
                 }
             )
-
-            color = SHELF_COLORS.get(col_name)
             if color:
                 header_format.set_bg_color(color)
 
-            worksheet.write(0, col_idx, col_name, header_format)
+            worksheet.write(1, col_idx, col_name, header_format)
 
         # Set a decent column width
         worksheet.set_column(0, len(SHELF_ORDER) - 1, 22)
@@ -125,7 +160,9 @@ Paste a list of label IDs or upload a file, and this app will:
 - Detect the shelf from **digit 9** of the label ID.
 - Put labels with shelves A–O into their shelf columns.
 - Put all others into the **Others** column.
-- Generate an Excel file with **the same header colors** as your Furjan sheet.
+- Generate an Excel file with:
+  - Row 1 = color code (#) for each shelf
+  - Row 2 = shelf letter (A, B, C, …, Others)
 """
 )
 
@@ -144,7 +181,6 @@ if input_mode == "Paste list":
         placeholder="Example:\nHAZ-A101A110\nHAZ-A101B110\nHAZ-A101I123\nSTOWAGE_1_A_001",
     )
     if text:
-        # split by newline or comma
         raw = []
         for line in text.splitlines():
             for part in line.split(","):
@@ -172,7 +208,6 @@ else:  # Upload file
         if label_column_name and label_column_name in df_in.columns:
             labels = df_in[label_column_name].tolist()
         else:
-            # take first column by default
             first_col = df_in.columns[0]
             labels = df_in[first_col].tolist()
 
